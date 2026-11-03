@@ -1,6 +1,6 @@
 // Кэш оболочки приложения, чтобы оно открывалось с главного экрана мгновенно.
 // Запросы к ntfy.sh не кэшируются: состояние и события всегда живые.
-const CACHE = 'esp-alarma-v1';
+const CACHE = 'esp-alarma-v2';
 const SHELL = ['./', 'index.html', 'manifest.webmanifest', 'icon-192.png', 'icon-512.png'];
 
 self.addEventListener('install', e => {
@@ -22,8 +22,26 @@ self.addEventListener('fetch', e => {
     .catch(() => caches.match(e.request)));
 });
 
+// Push от сигнализации: {"body": "...", "p": "urgent|high|default", "t": unix}
+self.addEventListener('push', e => {
+  let m = {};
+  try { m = e.data ? e.data.json() : {}; } catch { m = { body: e.data ? e.data.text() : '' }; }
+  const urgent = m.p === 'urgent', high = m.p === 'high';
+  const title = urgent ? '🚨 ТРЕВОГА — мастерская' : high ? '⚠️ Охрана мастерской' : 'Охрана мастерской';
+  e.waitUntil(self.registration.showNotification(title, {
+    body: m.body || 'Событие сигнализации',
+    icon: 'icon-192.png',
+    badge: 'icon-192.png',
+    tag: urgent ? 'alarm' : 'ev-' + (m.t || Date.now()),
+    renotify: urgent,
+    requireInteraction: urgent,                  // тревога висит, пока её не смахнут
+    vibrate: urgent ? [400, 200, 400, 200, 800] : [150],
+    timestamp: m.t ? m.t * 1000 : Date.now(),
+  }));
+});
+
 self.addEventListener('notificationclick', e => {
   e.notification.close();
-  e.waitUntil(self.clients.matchAll({ type: 'window' }).then(list =>
+  e.waitUntil(self.clients.matchAll({ type: 'window', includeUncontrolled: true }).then(list =>
     list.length ? list[0].focus() : self.clients.openWindow('./')));
 });

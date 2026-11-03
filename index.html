@@ -41,7 +41,7 @@ main { max-width: 520px; margin: 0 auto; display: grid; gap: 14px; }
 h1 { font-size: 17px; margin: 0; font-weight: 650; }
 h2 { font-size: 12px; margin: 0 0 8px; font-weight: 600; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); }
 .top { display: flex; justify-content: space-between; align-items: center; gap: 10px; }
-.pill { font-size: 12.5px; padding: 4px 10px; border-radius: 999px; border: 1px solid var(--line); color: var(--muted); white-space: nowrap; }
+.pill { font: inherit; font-size: 12.5px; padding: 4px 10px; border-radius: 999px; border: 1px solid var(--line); background: transparent; color: var(--muted); white-space: nowrap; cursor: pointer; }
 .pill.on { color: var(--ok); border-color: color-mix(in srgb, var(--ok) 45%, var(--line)); }
 .pill.off { color: var(--bad); border-color: color-mix(in srgb, var(--bad) 45%, var(--line)); }
 .card { background: var(--card); border: 1px solid var(--line); border-radius: 16px; padding: 16px; }
@@ -64,9 +64,10 @@ button:disabled { opacity: .5; cursor: default; }
 button.big { grid-column: 1 / -1; padding: 18px; font-size: 17px; color: var(--on-big); border: 0; background: var(--ok); }
 button.big.disarm { background: var(--bad); }
 button.big.confirm { outline: 3px solid var(--fg); outline-offset: 2px; }
-.note { color: var(--muted); font-size: 13px; }
+.note { color: var(--muted); font-size: 13px; margin: 0 0 10px; }
 .status-line { min-height: 1.4em; margin: 8px 2px 14px; font-size: 13.5px; color: var(--muted); }
 .status-line.err { color: var(--bad); }
+.status-line.ok { color: var(--ok); }
 
 .feed { display: grid; gap: 10px; }
 .ev { display: grid; grid-template-columns: 30px minmax(0, 1fr); gap: 10px; padding: 10px 0; border-top: 1px solid var(--line); }
@@ -94,7 +95,7 @@ a { color: var(--accent); }
 <main>
   <div class="top">
     <h1>Охрана мастерской</h1>
-    <span class="pill" id="link">нет данных</span>
+    <button class="pill" id="link" title="Проверить связь">нет данных</button>
   </div>
 
   <!-- привязка -->
@@ -111,19 +112,28 @@ a { color: var(--accent); }
     <div class="card hero" id="hero" data-st="">
       <div class="dial" id="dial">—</div>
       <div>
-        <div class="stname" id="stName">Жду состояние…</div>
-        <div class="stsub" id="stSub">Сигнализация присылает его при каждом изменении и раз в 5 минут</div>
+        <div class="stname" id="stName">Связываюсь…</div>
+        <div class="stsub" id="stSub">Спрашиваю у сигнализации её режим</div>
       </div>
     </div>
 
     <div class="actions" style="margin-top:14px">
       <button class="big" id="mainBtn" disabled>Поставить на охрану</button>
       <button id="snapBtn">Снимок с камер</button>
-      <button id="refreshBtn">Обновить</button>
+      <button id="refreshBtn">Проверить связь</button>
     </div>
     <div class="status-line" id="cmdMsg" aria-live="polite"></div>
 
     <div class="card">
+      <h2>Уведомления</h2>
+      <p class="note" id="pushNote">Push-уведомления приходят на этот телефон, даже когда приложение закрыто.</p>
+      <div class="row">
+        <button id="pushBtn">Включить push-уведомления</button>
+      </div>
+      <div class="status-line" id="pushMsg"></div>
+    </div>
+
+    <div class="card" style="margin-top:14px">
       <h2>События</h2>
       <div class="feed" id="feed"><div class="empty">Событий за последние 12 часов нет</div></div>
     </div>
@@ -134,13 +144,8 @@ a { color: var(--accent); }
     </div>
 
     <div class="card" style="margin-top:14px">
-      <h2>Уведомления</h2>
-      <p class="note" id="notifNote">Пока приложение открыто, тревоги показываются системным уведомлением. Чтобы они приходили и при закрытом приложении, установите приложение <b>ntfy</b> и подпишитесь в нём на топик событий.</p>
+      <h2>Телефон</h2>
       <div class="row">
-        <button id="notifBtn">Разрешить уведомления</button>
-        <button id="ntfyBtn">Открыть в ntfy</button>
-      </div>
-      <div class="row" style="margin-top:10px">
         <button id="unpairBtn">Отвязать этот телефон</button>
       </div>
     </div>
@@ -152,58 +157,84 @@ a { color: var(--accent); }
 'use strict';
 const $ = s => document.querySelector(s);
 const LS_KEY = 'esp-alarma-pair';
+const LS_PUSH = 'esp-alarma-push';
 const NTFY = 'https://ntfy.sh';
-const ONLINE_S = 7 * 60;                 // сигнализация шлёт состояние минимум раз в 5 минут
+const PING_EVERY_MS = 5 * 60 * 1000;     // пока экран открыт — «ты на связи?» раз в 5 минут
+const PING_IDLE_STOP_MS = 30 * 60 * 1000; // без касаний 30 минут — перестаём, бережём лимит ntfy
+const REPLY_TIMEOUT_MS = 20000;
+const FRESH_S = 6 * 60;
 const TAGS = { rotating_light: '🚨', lock: '🔒', unlock: '🔓', warning: '⚠️', door: '🚪', key: '🔑', camera: '📷', white_check_mark: '✅' };
 
 let cfg = null, key = null;
-let state = null, stateTime = 0;         // время сервера ntfy, когда пришло состояние (с)
+let state = null, stateTime = 0;          // время сервера ntfy, когда пришло последнее состояние (с)
 let pending = null, confirmUntil = 0;
+let ping = null;                          // {nonce, sent, timer} — ждём подтверждения связи
+let lastReplyMs = 0, noReply = false, lastTouch = Date.now(), pingTimer = 0;
+let streams = [];
 const seen = new Set();
 
 const enc = new TextEncoder();
 const hex = buf => [...new Uint8Array(buf)].map(b => b.toString(16).padStart(2, '0')).join('');
 async function hmac(text) { return hex(await crypto.subtle.sign('HMAC', key, enc.encode(text))); }
+const b64url = buf => btoa(String.fromCharCode(...new Uint8Array(buf))).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+const fromB64url = s => Uint8Array.from(atob(s.replace(/-/g, '+').replace(/_/g, '/') + '==='.slice((s.length + 3) % 4)), c => c.charCodeAt(0));
+const lsGet = k => { try { return localStorage.getItem(k); } catch { return null; } };
+const lsSet = (k, v) => { try { v === null ? localStorage.removeItem(k) : localStorage.setItem(k, v); } catch {} };
 
 function parsePair(s) {
   const m = s.trim().match(/^esp-alarma:1:([\w-]+):([\w-]+):([\w-]+):(\S{16,})$/);
   return m && { events: m[1], cmd: m[2], state: m[3], secret: m[4] };
 }
-function load() { try { return parsePair(localStorage.getItem(LS_KEY) || ''); } catch { return null; } }
 
 async function start(c) {
   cfg = c;
   key = await crypto.subtle.importKey('raw', enc.encode(cfg.secret), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
   $('#setup').hidden = true;
   $('#panel').hidden = false;
-  loadHistory();
-  subscribe(cfg.state, m => onState(m));
-  subscribe(cfg.events, m => addEvent(m, true));
+  connect();
   setInterval(render, 1000);
-  render();
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) { lastTouch = Date.now(); connect(); } });
+  window.addEventListener('online', connect);
+  ['pointerdown', 'keydown'].forEach(t => document.addEventListener(t, () => { lastTouch = Date.now(); }, { passive: true }));
+  renderPush();
 }
 
-/* ---------- ntfy ---------- */
+/* ---------- связь: подписки, история, проверка «ты на связи?» ---------- */
+function connect() {
+  streams.forEach(es => es.close());       // на телефоне фоновые соединения тихо умирают — пересоздаём
+  streams = [subscribe(cfg.state, onState), subscribe(cfg.events, m => addEvent(m, true))];
+  loadHistory();
+  sendPing();
+  clearInterval(pingTimer);
+  pingTimer = setInterval(() => {
+    if (!document.hidden && Date.now() - lastTouch < PING_IDLE_STOP_MS) sendPing();
+  }, PING_EVERY_MS);
+}
+
 function subscribe(topic, onMsg) {
   const es = new EventSource(`${NTFY}/${topic}/sse`);
   es.onmessage = e => { try { onMsg(JSON.parse(e.data)); } catch (err) { console.warn(err); } };
-  es.onerror = () => { /* EventSource переподключается сам */ };
   return es;
 }
 async function poll(topic, since) {
   const r = await fetch(`${NTFY}/${topic}/json?poll=1&since=${since}`);
-  const text = await r.text();
-  return text.split('\n').filter(Boolean).map(l => JSON.parse(l)).filter(m => m.event === 'message');
+  return (await r.text()).split('\n').filter(Boolean).map(l => JSON.parse(l)).filter(m => m.event === 'message');
 }
 async function loadHistory() {
   try {
     const st = await poll(cfg.state, 'latest');
     if (st.length) await onState(st[st.length - 1]);
-  } catch (e) { setMsg('Не удалось получить состояние: нет связи с ntfy.sh', true); }
-  try {
-    const evs = await poll(cfg.events, '12h');
-    evs.forEach(m => addEvent(m, false));
-  } catch (e) { /* лента подтянется по живой подписке */ }
+  } catch (e) { /* нет сети — сообщит проверка связи */ }
+  try { (await poll(cfg.events, '12h')).forEach(m => addEvent(m, false)); } catch (e) {}
+}
+
+async function sendPing() {
+  if (ping) return;
+  const n = await send('status', null, true);
+  if (!n) { noReply = true; render(); return; }
+  ping = { nonce: n, sent: Date.now() };
+  ping.timer = setTimeout(() => { if (ping && ping.nonce === n) { ping = null; noReply = true; render(); } }, REPLY_TIMEOUT_MS);
+  render();
 }
 
 /* ---------- состояние ---------- */
@@ -217,22 +248,34 @@ async function onState(m) {
   if (stateTime && m.time < stateTime) return;
   const changed = !state || state.st !== s.st;
   state = s; stateTime = m.time;
-  if (pending && (changed || pending.c === 'status' || pending.c === 'snap')) { setMsg(pending.done); pending = null; }
+  if (Date.now() / 1000 - m.time < FRESH_S) { lastReplyMs = Math.max(lastReplyMs, m.time * 1000); noReply = false; }
+  if (ping && s.ack === ping.nonce) { clearTimeout(ping.timer); ping = null; lastReplyMs = Date.now(); noReply = false; }
+  if (pending && (s.ack === pending.nonce || changed)) { setMsg(pending.done, 'ok'); clearTimeout(pending.timer); pending = null; }
   renderLog();
+  renderPush();
   render();
 }
 
+function fmtAgo(s) {
+  if (!isFinite(s)) return '';
+  if (s < 60) return `${Math.max(0, Math.round(s))} с`;
+  if (s < 3600) return `${Math.round(s / 60)} мин`;
+  return `${Math.round(s / 3600)} ч`;
+}
+
 function render() {
-  const now = Date.now() / 1000;
-  const age = stateTime ? now - stateTime : Infinity;
-  const online = age < ONLINE_S;
+  const now = Date.now();
   const link = $('#link');
-  link.className = 'pill ' + (online ? 'on' : stateTime ? 'off' : '');
-  link.textContent = online ? '● на связи' : stateTime ? `нет связи ${fmtAgo(age)}` : 'нет данных';
+  const replyAge = lastReplyMs ? (now - lastReplyMs) / 1000 : Infinity;
+  if (ping) { link.className = 'pill'; link.textContent = 'проверяю связь…'; }
+  else if (noReply) { link.className = 'pill off'; link.textContent = '● нет ответа'; }
+  else if (replyAge < FRESH_S) { link.className = 'pill on'; link.textContent = '● на связи'; }
+  else if (lastReplyMs) { link.className = 'pill'; link.textContent = `проверено ${fmtAgo(replyAge)} назад`; }
+  else { link.className = 'pill'; link.textContent = 'нет данных'; }
 
   if (!state) return;
-  const hero = $('#hero');
-  hero.dataset.st = state.st;
+  const age = now / 1000 - stateTime;
+  $('#hero').dataset.st = state.st;
   $('#stName').textContent = state.name.charAt(0) + state.name.slice(1).toLowerCase();
   const left = Math.max(0, Math.round(state.left - age));
   const timed = ['EXIT', 'ENTRY', 'ALARM'].includes(state.st);
@@ -240,14 +283,14 @@ function render() {
   const parts = [state.door ? 'дверь ОТКРЫТА' : 'дверь закрыта'];
   if (timed && left > 0) parts.push(state.st === 'ALARM' ? `сирена ещё ${left} с` : `осталось ${left} с`);
   if (state.mem && state.st === 'DISARMED') parts.push('во время охраны была тревога');
-  parts.push(`обновлено ${fmtAgo(age)} назад`);
+  if (noReply) parts.push(`последние данные ${fmtAgo(age)} назад`);
   $('#stSub').textContent = parts.join(' · ');
 
   const armed = !['DISARMED', 'LEARN'].includes(state.st);
   const btn = $('#mainBtn');
-  btn.disabled = !online || state.st === 'LEARN';
+  btn.disabled = state.st === 'LEARN';
   btn.classList.toggle('disarm', armed);
-  const confirming = Date.now() < confirmUntil;
+  const confirming = now < confirmUntil;
   btn.classList.toggle('confirm', confirming);
   btn.textContent = confirming ? 'Нажмите ещё раз для подтверждения'
     : armed ? (state.st === 'EXIT' ? 'Отменить постановку' : 'Снять с охраны') : 'Поставить на охрану';
@@ -275,6 +318,7 @@ function addEvent(m, live) {
   const el = document.createElement('div');
   el.className = 'ev';
   el.dataset.p = m.priority || 3;
+  el.dataset.time = m.time;
   const icon = (m.tags || []).map(t => TAGS[t]).find(Boolean) || '•';
   el.innerHTML = '<div class="ic"></div><div><div class="tx"></div><div class="tm"></div></div>';
   el.querySelector('.ic').textContent = icon;
@@ -287,38 +331,50 @@ function addEvent(m, live) {
     img.src = m.attachment.url;
     el.querySelector('.tx').parentNode.appendChild(img);
   }
-  // по времени: новые сверху
   const before = [...feed.children].find(c => Number(c.dataset.time) < m.time);
-  el.dataset.time = m.time;
   feed.insertBefore(el, before || null);
   while (feed.children.length > 60) feed.lastChild.remove();
-  if (live && (m.priority || 3) >= 4) notify(m, icon);
+  if (live && (m.priority || 3) >= 4 && lsGet(LS_PUSH) !== '1') localNotify(m, icon);
 }
 
-async function notify(m, icon) {
+async function localNotify(m, icon) {
   if (!('Notification' in window) || Notification.permission !== 'granted') return;
   try {
     const reg = await navigator.serviceWorker?.ready;
-    const opts = { body: m.message || 'Снимок с камеры', tag: m.id, icon: 'icon-192.png', renotify: true, requireInteraction: m.priority >= 5 };
-    if (reg) reg.showNotification(`${icon} Охрана мастерской`, opts);
-    else new Notification(`${icon} Охрана мастерской`, opts);
+    reg?.showNotification(`${icon} Охрана мастерской`, { body: m.message || '', tag: m.id, icon: 'icon-192.png' });
   } catch (e) { console.warn(e); }
 }
 
 /* ---------- команды ---------- */
-function setMsg(text, err) { const el = $('#cmdMsg'); el.textContent = text; el.classList.toggle('err', !!err); }
+function setMsg(text, kind) { const el = $('#cmdMsg'); el.textContent = text; el.className = 'status-line' + (kind ? ' ' + kind : ''); }
 function nonce() { const a = new Uint8Array(9); crypto.getRandomValues(a); return hex(a); }
 
-async function send(c, waiting, done) {
+// возвращает nonce отправленной команды или null
+async function send(c, data, quiet) {
   const t = Math.floor(Date.now() / 1000), n = nonce();
-  const h = await hmac(`${c}|${t}|${n}`);
-  setMsg(waiting);
+  const h = await hmac(`${c}|${t}|${n}` + (data != null ? `|${data}` : ''));
+  const body = { c, t, n, h };
+  if (data != null) body.d = data;
   try {
-    const r = await fetch(`${NTFY}/${cfg.cmd}`, { method: 'POST', body: JSON.stringify({ c, t, n, h }) });
+    const r = await fetch(`${NTFY}/${cfg.cmd}`, { method: 'POST', body: JSON.stringify(body) });
+    if (r.status === 429) throw new Error('лимит');
     if (!r.ok) throw new Error('HTTP ' + r.status);
-    pending = { c, done };
-    setTimeout(() => { if (pending && pending.c === c) { setMsg('Сигнализация не ответила за 20 с. Проверьте, что она в сети.', true); pending = null; } }, 20000);
-  } catch (e) { setMsg('Команда не ушла: нет связи с ntfy.sh', true); }
+    return n;
+  } catch (e) {
+    if (!quiet) setMsg(e.message === 'лимит' ? 'ntfy.sh временно не принимает сообщения с этого телефона (суточный лимит).' : 'Команда не ушла: нет интернета или ntfy.sh недоступен.', 'err');
+    return null;
+  }
+}
+
+async function command(c, waiting, done) {
+  setMsg(waiting);
+  const n = await send(c);
+  if (!n) return;
+  clearTimeout(pending?.timer);
+  pending = { c, nonce: n, done };
+  pending.timer = setTimeout(() => {
+    if (pending && pending.nonce === n) { setMsg('Сигнализация не ответила за 20 с. Проверьте, что она включена и в сети.', 'err'); pending = null; noReply = true; render(); }
+  }, REPLY_TIMEOUT_MS);
 }
 
 $('#mainBtn').addEventListener('click', () => {
@@ -326,44 +382,91 @@ $('#mainBtn').addEventListener('click', () => {
   if (Date.now() > confirmUntil) { confirmUntil = Date.now() + 3000; render(); return; }
   confirmUntil = 0;
   const armed = !['DISARMED', 'LEARN'].includes(state.st);
-  if (armed) send('disarm', 'Снимаю с охраны…', 'Снято с охраны');
-  else send('arm', 'Ставлю на охрану…', 'Пошла задержка на выход');
+  if (armed) command('disarm', 'Снимаю с охраны…', 'Снято с охраны');
+  else command('arm', 'Ставлю на охрану…', 'Пошла задержка на выход');
   render();
 });
-$('#snapBtn').addEventListener('click', () => send('snap', 'Прошу снимки с камер…', 'Снимки придут в ленту через несколько секунд'));
-$('#refreshBtn').addEventListener('click', () => send('status', 'Запрашиваю состояние…', 'Состояние обновлено'));
-$('#notifBtn').addEventListener('click', async () => {
-  if (!('Notification' in window)) { $('#notifNote').textContent = 'Этот браузер не умеет показывать уведомления. Используйте приложение ntfy.'; return; }
-  const p = await Notification.requestPermission();
-  $('#notifBtn').textContent = p === 'granted' ? 'Уведомления разрешены' : 'Уведомления запрещены в браузере';
+$('#snapBtn').addEventListener('click', () => command('snap', 'Прошу снимки с камер…', 'Запрос принят, ответ появится в ленте'));
+$('#refreshBtn').addEventListener('click', () => { noReply = false; connect(); });
+$('#link').addEventListener('click', () => { noReply = false; sendPing(); });
+
+/* ---------- Web Push ---------- */
+function pushSupported() { return 'serviceWorker' in navigator && 'PushManager' in window && 'Notification' in window; }
+
+async function renderPush() {
+  const btn = $('#pushBtn'), note = $('#pushNote');
+  if (!pushSupported()) {
+    btn.disabled = true;
+    const ios = /iPhone|iPad/.test(navigator.userAgent);
+    note.textContent = ios
+      ? 'На iPhone push работают, только если приложение добавлено на экран «Домой» (Поделиться → На экран «Домой») и открыто оттуда. Нужна iOS 16.4 или новее.'
+      : 'Этот браузер не поддерживает push-уведомления. Откройте приложение в Chrome.';
+    return;
+  }
+  const reg = await navigator.serviceWorker.ready;
+  const sub = await reg.pushManager.getSubscription();
+  const on = !!sub && lsGet(LS_PUSH) === '1';
+  btn.textContent = on ? 'Отключить push на этом телефоне' : 'Включить push-уведомления';
+  btn.disabled = !state?.vapid;
+  const phones = state ? ` Телефонов с push у сигнализации: ${state.push}.` : '';
+  note.textContent = (on ? 'Push включены: тревоги придут, даже если приложение закрыто.' : 'Push-уведомления приходят на этот телефон, даже когда приложение закрыто.') + phones;
+}
+
+$('#pushBtn').addEventListener('click', async () => {
+  const msg = $('#pushMsg');
+  msg.className = 'status-line';
+  try {
+    const reg = await navigator.serviceWorker.ready;
+    let sub = await reg.pushManager.getSubscription();
+    if (sub && lsGet(LS_PUSH) === '1') {
+      const n = await send('push-unsub', sub.endpoint);
+      await sub.unsubscribe();
+      lsSet(LS_PUSH, null);
+      msg.textContent = n ? 'Push на этом телефоне отключены.' : 'Отключил на телефоне, но сигнализация не получила команду — она удалит подписку сама при следующей отправке.';
+      renderPush();
+      return;
+    }
+    if (await Notification.requestPermission() !== 'granted') {
+      msg.textContent = 'Уведомления запрещены. Разрешите их для этого сайта в настройках браузера.';
+      msg.className = 'status-line err';
+      return;
+    }
+    if (sub) await sub.unsubscribe();       // подписка со старым ключом не подойдёт
+    sub = await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: fromB64url(state.vapid) });
+    const data = JSON.stringify({ e: sub.endpoint, k: b64url(sub.getKey('p256dh')), a: b64url(sub.getKey('auth')) });
+    msg.textContent = 'Передаю подписку сигнализации…';
+    const n = await send('push-sub', data);
+    if (!n) { msg.textContent = 'Не удалось передать подписку: нет связи с ntfy.sh.'; msg.className = 'status-line err'; return; }
+    lsSet(LS_PUSH, '1');
+    msg.textContent = 'Готово. Через несколько секунд придёт проверочное уведомление.';
+    msg.className = 'status-line ok';
+    renderPush();
+  } catch (e) {
+    msg.textContent = 'Не получилось включить push: ' + e.message;
+    msg.className = 'status-line err';
+  }
 });
-$('#ntfyBtn').addEventListener('click', () => { window.open(`${NTFY}/${cfg.events}`, '_blank', 'noopener'); });
+
 $('#unpairBtn').addEventListener('click', () => {
   if ($('#unpairBtn').dataset.sure !== '1') { $('#unpairBtn').dataset.sure = '1'; $('#unpairBtn').textContent = 'Точно отвязать? Нажмите ещё раз'; return; }
-  try { localStorage.removeItem(LS_KEY); } catch {}
+  lsSet(LS_KEY, null);
+  lsSet(LS_PUSH, null);
   location.reload();
 });
 $('#pairBtn').addEventListener('click', () => {
   const text = $('#pairText').value;
   const c = parsePair(text);
   if (!c) { $('#pairMsg').textContent = 'Строка не похожа на строку привязки. Она начинается с esp-alarma:1: и выводится командой pair.'; $('#pairMsg').className = 'status-line err'; return; }
-  try { localStorage.setItem(LS_KEY, text.trim()); } catch {}
+  lsSet(LS_KEY, text.trim());
   start(c);
 });
-
-function fmtAgo(s) {
-  if (!isFinite(s)) return '';
-  if (s < 60) return `${Math.max(0, Math.round(s))} с`;
-  if (s < 3600) return `${Math.round(s / 60)} мин`;
-  return `${Math.round(s / 3600)} ч`;
-}
 
 if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => {});
 if (!window.crypto?.subtle) {
   document.querySelector('main').innerHTML = '<div class="card">Приложение должно открываться по https — иначе браузер не даёт проверить подписи.</div>';
   return;
 }
-const saved = load();
+const saved = parsePair(lsGet(LS_KEY) || '');
 if (saved) start(saved); else $('#setup').hidden = false;
 })();
 </script>
