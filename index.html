@@ -57,7 +57,14 @@ h2 { font-size: 12px; margin: 0 0 8px; font-weight: 600; letter-spacing: .08em; 
 .hero[data-st="ARMED"] { --st: var(--ok); }
 .hero[data-st="ALARM"], .hero[data-st="ALARM_WAIT"] { --st: var(--bad); }
 
-.actions { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.actions { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
+.actions button:not(.big) { padding: 12px 8px; font-size: 14px; }
+.form { display: grid; gap: 12px; }
+.field { display: grid; grid-template-columns: minmax(0, 1fr) 96px; gap: 10px; align-items: center; }
+.field span { font-size: 14px; }
+.field small { display: block; color: var(--muted); font-size: 12px; }
+.field input { width: 100%; font: 600 17px/1 var(--f-num); padding: 10px; border-radius: 10px; border: 1px solid var(--line); background: var(--bg); color: var(--fg); text-align: right; }
+.field input:focus-visible { outline: 3px solid var(--accent); outline-offset: 1px; }
 button { font: 600 15px/1.2 var(--f-ui); border-radius: 12px; border: 1px solid var(--line); background: var(--card); color: var(--fg); padding: 14px 12px; cursor: pointer; }
 button:focus-visible, textarea:focus-visible { outline: 3px solid var(--accent); outline-offset: 2px; }
 button:disabled { opacity: .5; cursor: default; }
@@ -121,8 +128,26 @@ a { color: var(--accent); }
       <button class="big" id="mainBtn" disabled>Поставить на охрану</button>
       <button id="snapBtn">Снимок с камер</button>
       <button id="refreshBtn">Проверить связь</button>
+      <button id="settingsBtn" aria-expanded="false" aria-controls="settings">Настройки</button>
     </div>
     <div class="status-line" id="cmdMsg" aria-live="polite"></div>
+
+    <section class="card" id="settings" hidden style="margin-bottom:14px">
+      <h2>Настройки сигнализации</h2>
+      <div class="form">
+        <label class="field"><span>Задержка на выход<small>после касания ключом или кнопки «Поставить», 5–300 с</small></span>
+          <input type="number" id="cfgExit" min="5" max="300" step="1" inputmode="numeric"></label>
+        <label class="field"><span>Задержка на вход<small>сколько есть на снятие после открытия двери, 5–120 с</small></span>
+          <input type="number" id="cfgEntry" min="5" max="120" step="1" inputmode="numeric"></label>
+        <label class="field"><span>Сирена звучит не дольше<small>за одну тревогу, 10–600 с</small></span>
+          <input type="number" id="cfgSiren" min="10" max="600" step="1" inputmode="numeric"></label>
+        <div class="row">
+          <button id="cfgSave">Сохранить</button>
+          <button id="cfgCancel">Закрыть</button>
+        </div>
+        <div class="status-line" id="cfgMsg" aria-live="polite"></div>
+      </div>
+    </section>
 
     <div class="card">
       <h2>Уведомления</h2>
@@ -251,6 +276,14 @@ async function onState(m) {
   if (Date.now() / 1000 - m.time < FRESH_S) { lastReplyMs = Math.max(lastReplyMs, m.time * 1000); noReply = false; }
   if (ping && s.ack === ping.nonce) { clearTimeout(ping.timer); ping = null; lastReplyMs = Date.now(); noReply = false; }
   if (pending && (s.ack === pending.nonce || changed)) { setMsg(pending.done, 'ok'); clearTimeout(pending.timer); pending = null; }
+  if (cfgPending && s.ack === cfgPending.nonce) {
+    clearTimeout(cfgPending.timer);
+    const want = cfgPending.want, got = s.cfg || {};
+    const ok = want.exit === got.exit && want.entry === got.entry && want.siren === got.siren;
+    cfgMsg(ok ? 'Сохранено на сигнализации.' : 'Сигнализация не приняла значения — проверьте пределы.', ok ? 'ok' : 'err');
+    cfgPending = null;
+    fillCfg();
+  }
   renderLog();
   renderPush();
   render();
@@ -389,6 +422,41 @@ $('#mainBtn').addEventListener('click', () => {
 $('#snapBtn').addEventListener('click', () => command('snap', 'Прошу снимки с камер…', 'Запрос принят, ответ появится в ленте'));
 $('#refreshBtn').addEventListener('click', () => { noReply = false; connect(); });
 $('#link').addEventListener('click', () => { noReply = false; sendPing(); });
+
+/* ---------- настройки ---------- */
+let cfgPending = null;
+function cfgMsg(text, kind) { const el = $('#cfgMsg'); el.textContent = text; el.className = 'status-line' + (kind ? ' ' + kind : ''); }
+function fillCfg() {
+  const c = state?.cfg;
+  if (!c) return;
+  $('#cfgExit').value = c.exit;
+  $('#cfgEntry').value = c.entry;
+  $('#cfgSiren').value = c.siren;
+}
+function toggleSettings(open) {
+  $('#settings').hidden = !open;
+  $('#settingsBtn').setAttribute('aria-expanded', String(open));
+  if (open) {
+    cfgMsg(state?.cfg ? '' : 'Жду от сигнализации текущие значения…');
+    fillCfg();
+  }
+}
+$('#settingsBtn').addEventListener('click', () => toggleSettings($('#settings').hidden));
+$('#cfgCancel').addEventListener('click', () => toggleSettings(false));
+$('#cfgSave').addEventListener('click', async () => {
+  const want = { exit: +$('#cfgExit').value, entry: +$('#cfgEntry').value, siren: +$('#cfgSiren').value };
+  const bad = [[want.exit, 5, 300, 'выход'], [want.entry, 5, 120, 'вход'], [want.siren, 10, 600, 'сирена']]
+    .find(([v, lo, hi]) => !Number.isInteger(v) || v < lo || v > hi);
+  if (bad) { cfgMsg(`«${bad[3]}»: нужно целое число от ${bad[1]} до ${bad[2]}.`, 'err'); return; }
+  cfgMsg('Отправляю на сигнализацию…');
+  const n = await send('cfg', JSON.stringify(want));
+  if (!n) { cfgMsg('Не ушло: нет связи с ntfy.sh.', 'err'); return; }
+  clearTimeout(cfgPending?.timer);
+  cfgPending = { nonce: n, want };
+  cfgPending.timer = setTimeout(() => {
+    if (cfgPending && cfgPending.nonce === n) { cfgMsg('Сигнализация не ответила за 20 с.', 'err'); cfgPending = null; }
+  }, REPLY_TIMEOUT_MS);
+});
 
 /* ---------- Web Push ---------- */
 function pushSupported() { return 'serviceWorker' in navigator && 'PushManager' in window && 'Notification' in window; }
