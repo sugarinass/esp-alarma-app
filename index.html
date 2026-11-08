@@ -90,6 +90,13 @@ button.big.confirm { outline: 3px solid var(--fg); outline-offset: 2px; }
 .log div:first-child { border-top: 0; }
 .log .t { color: var(--muted); }
 .empty { color: var(--muted); font-size: 14px; }
+.keys { display: grid; }
+.key { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 10px; align-items: center; padding: 8px 0; border-top: 1px solid var(--line); }
+.key:first-child { border-top: 0; padding-top: 0; }
+.key .id { font: 14px/1.3 var(--f-num); overflow-wrap: anywhere; }
+.key .tag { display: inline-block; margin-left: 6px; font: 600 11px/1 var(--f-ui); padding: 3px 7px; border-radius: 999px; background: color-mix(in srgb, var(--accent) 16%, transparent); color: var(--accent); vertical-align: 1px; }
+.key button { padding: 8px 12px; font-size: 13.5px; }
+.key button.confirm, #clearKeysBtn.confirm { color: var(--bad); border-color: var(--bad); }
 
 textarea { width: 100%; min-height: 96px; font: 13px/1.4 var(--f-num); padding: 10px; border-radius: 10px; border: 1px solid var(--line); background: var(--bg); color: var(--fg); resize: vertical; }
 .row { display: flex; gap: 10px; flex-wrap: wrap; }
@@ -156,6 +163,17 @@ a { color: var(--accent); }
         <button id="pushBtn">Включить push-уведомления</button>
       </div>
       <div class="status-line" id="pushMsg"></div>
+    </div>
+
+    <div class="card" style="margin-top:14px">
+      <h2>Ключи</h2>
+      <div class="keys" id="keyList"><div class="empty">Жду список от сигнализации…</div></div>
+      <div class="row" style="margin-top:12px">
+        <button id="learnBtn">Записать ключи</button>
+        <button id="clearKeysBtn">Стереть все</button>
+      </div>
+      <div class="status-line" id="keyMsg" aria-live="polite"></div>
+      <p class="note" style="margin:0">«Записать ключи» включает запись: приложенный новый ключ добавляется, уже записанный удаляется. Запись выключается мастер-ключом или через 30 с после последнего касания. Если ключей нет, первый приложенный станет мастер-ключом. Менять ключи можно, только когда сигнализация снята.</p>
     </div>
 
     <div class="card" style="margin-top:14px">
@@ -284,7 +302,14 @@ async function onState(m) {
     cfgPending = null;
     fillCfg();
   }
+  if (keyPending && s.ack === keyPending.nonce) {
+    clearTimeout(keyPending.timer);
+    const r = keyPending.check(s);
+    keyMsg(r[0], r[1]);
+    keyPending = null;
+  }
   renderLog();
+  renderKeys();
   renderPush();
   render();
 }
@@ -311,9 +336,10 @@ function render() {
   $('#hero').dataset.st = state.st;
   $('#stName').textContent = state.name.charAt(0) + state.name.slice(1).toLowerCase();
   const left = Math.max(0, Math.round(state.left - age));
-  const timed = ['EXIT', 'ENTRY', 'ALARM'].includes(state.st);
+  const timed = ['EXIT', 'ENTRY', 'ALARM', 'LEARN'].includes(state.st);
   $('#dial').textContent = timed && left > 0 ? left : { DISARMED: 'off', ARMED: 'on', ALARM_WAIT: '!', LEARN: 'key' }[state.st] || '!';
   const parts = [state.door ? 'дверь ОТКРЫТА' : 'дверь закрыта'];
+  if (state.st === 'LEARN') parts.push('приложите ключ к считывателю');
   if (timed && left > 0) parts.push(state.st === 'ALARM' ? `сирена ещё ${left} с` : `осталось ${left} с`);
   if (state.mem && state.st === 'DISARMED') parts.push('во время охраны была тревога');
   if (noReply) parts.push(`последние данные ${fmtAgo(age)} назад`);
@@ -456,6 +482,91 @@ $('#cfgSave').addEventListener('click', async () => {
   cfgPending.timer = setTimeout(() => {
     if (cfgPending && cfgPending.nonce === n) { cfgMsg('Сигнализация не ответила за 20 с.', 'err'); cfgPending = null; }
   }, REPLY_TIMEOUT_MS);
+});
+
+/* ---------- ключи ---------- */
+const KEY_TIMEOUT_MS = 30000;
+let keyPending = null, keyConfirm = { what: null, until: 0 };
+function keyMsg(text, kind) { const el = $('#keyMsg'); el.textContent = text; el.className = 'status-line' + (kind ? ' ' + kind : ''); }
+const keysEditable = () => state && ['DISARMED', 'LEARN'].includes(state.st);
+
+// двойное нажатие для опасных действий: первое — «нажмите ещё раз», второе в течение 3 с — выполняет
+function confirmed(what) {
+  if (keyConfirm.what === what && Date.now() < keyConfirm.until) { keyConfirm = { what: null, until: 0 }; return true; }
+  keyConfirm = { what, until: Date.now() + 3000 };
+  renderKeys();
+  setTimeout(renderKeys, 3100);
+  return false;
+}
+
+async function keyCommand(c, data, waiting, check) {
+  if (!keysEditable()) { keyMsg('Сначала снимите сигнализацию с охраны.', 'err'); return; }
+  keyMsg(waiting);
+  const n = await send(c, data, true);
+  if (!n) { keyMsg('Команда не ушла: нет связи с ntfy.sh.', 'err'); return; }
+  clearTimeout(keyPending?.timer);
+  keyPending = { nonce: n, check };
+  keyPending.timer = setTimeout(() => {
+    if (keyPending && keyPending.nonce === n) { keyMsg('Сигнализация не ответила за 30 с.', 'err'); keyPending = null; }
+  }, KEY_TIMEOUT_MS);
+}
+
+function renderKeys() {
+  const el = $('#keyList');
+  const editable = keysEditable();
+  const now = Date.now();
+  $('#learnBtn').disabled = !state || state.st !== 'DISARMED';
+  const clr = $('#clearKeysBtn');
+  clr.disabled = !editable || !state.kl?.length;
+  const clrConfirm = keyConfirm.what === 'clear' && now < keyConfirm.until;
+  clr.classList.toggle('confirm', clrConfirm);
+  clr.textContent = clrConfirm ? 'Точно стереть все?' : 'Стереть все';
+  if (!state) return;
+  el.innerHTML = '';
+  if (!state.kl) {
+    el.innerHTML = `<div class="empty">Записано ключей: ${state.keys}. Чтобы видеть их список, обновите прошивку платы.</div>`;
+    return;
+  }
+  if (!state.kl.length) {
+    el.innerHTML = '<div class="empty">Ключей нет. Первый ключ, приложенный к считывателю, станет мастер-ключом.</div>';
+    return;
+  }
+  state.kl.forEach(([idx, id, master]) => {
+    const row = document.createElement('div');
+    row.className = 'key';
+    row.innerHTML = '<div class="id"></div><button></button>';
+    row.firstChild.textContent = `#${idx}  ${id}`;
+    if (master) {
+      const t = document.createElement('span');
+      t.className = 'tag';
+      t.textContent = 'мастер';
+      row.firstChild.appendChild(t);
+    }
+    const b = row.lastChild;
+    const sure = keyConfirm.what === 'del' + idx && now < keyConfirm.until;
+    b.textContent = sure ? 'Точно?' : 'Удалить';
+    b.classList.toggle('confirm', sure);
+    b.disabled = !editable;
+    b.setAttribute('aria-label', `Удалить ключ #${idx}`);
+    b.addEventListener('click', () => {
+      if (!confirmed('del' + idx)) return;
+      keyCommand('key-del', String(idx), `Удаляю ключ #${idx}…`,
+        s => (s.kl || []).some(k => k[0] === idx) ? ['Ключ не удалён: сигнализация не в режиме «снята».', 'err'] : [`Ключ #${idx} удалён.`, 'ok']);
+    });
+    el.appendChild(row);
+  });
+}
+
+$('#learnBtn').addEventListener('click', () => keyCommand('learn', null, 'Включаю запись ключей…',
+  s => s.st === 'LEARN'
+    ? ['Запись включена: прикладывайте ключи к считывателю по одному.', 'ok']
+    : ['Запись не включилась: сигнализация должна быть снята.', 'err']));
+$('#clearKeysBtn').addEventListener('click', () => {
+  if (!confirmed('clear')) return;
+  keyCommand('keys-clear', null, 'Стираю ключи…',
+    s => s.kl && !s.kl.length
+      ? ['Все ключи стёрты. Приложите свой ключ: он станет мастер-ключом.', 'ok']
+      : ['Ключи не стёрты: сигнализация не в режиме «снята».', 'err']);
 });
 
 /* ---------- Web Push ---------- */
