@@ -97,6 +97,11 @@ button.big.confirm { outline: 3px solid var(--fg); outline-offset: 2px; }
 .key .tag { display: inline-block; margin-left: 6px; font: 600 11px/1 var(--f-ui); padding: 3px 7px; border-radius: 999px; background: color-mix(in srgb, var(--accent) 16%, transparent); color: var(--accent); vertical-align: 1px; }
 .key button { padding: 8px 12px; font-size: 13.5px; }
 .key button.confirm, #clearKeysBtn.confirm { color: var(--bad); border-color: var(--bad); }
+.key .tag.me { background: color-mix(in srgb, var(--ok) 16%, transparent); color: var(--ok); }
+.field.wide { grid-template-columns: minmax(0, 1fr); }
+.field.wide input { text-align: left; font: 15px/1.2 var(--f-ui); }
+.check { display: flex; gap: 10px; align-items: flex-start; font-size: 14px; }
+.check input { width: 20px; height: 20px; margin: 1px 0 0; flex: none; accent-color: var(--accent); }
 
 textarea { width: 100%; min-height: 96px; font: 13px/1.4 var(--f-num); padding: 10px; border-radius: 10px; border: 1px solid var(--line); background: var(--bg); color: var(--fg); resize: vertical; }
 .row { display: flex; gap: 10px; flex-wrap: wrap; }
@@ -115,10 +120,10 @@ a { color: var(--accent); }
   <!-- привязка -->
   <section class="card" id="setup" hidden>
     <h2>Привязка к сигнализации</h2>
-    <p class="note">Подключите плату по USB, откройте монитор порта и введите команду <b>pair</b>. Скопируйте строку <code>esp-alarma:1:…</code> и вставьте её сюда. Строка хранится только на этом телефоне.</p>
-    <textarea id="pairText" placeholder="esp-alarma:1:…" autocomplete="off" spellcheck="false"></textarea>
-    <div class="status-line" id="pairMsg"></div>
-    <button class="big" id="pairBtn">Привязать</button>
+    <p class="note" id="pairNote">Вставьте сюда ссылку-приглашение: её создаёт телефон, который уже подключён к сигнализации (карточка «Телефоны» → «Пригласить телефон»). Подойдёт и строка привязки <code>esp-alarma:1:…</code> из команды <b>pair</b> в консоли платы.</p>
+    <textarea id="pairText" placeholder="https://…#join=… или esp-alarma:1:…" autocomplete="off" spellcheck="false"></textarea>
+    <div class="status-line" id="pairMsg" aria-live="polite"></div>
+    <button class="big" id="pairBtn">Подключить этот телефон</button>
   </section>
 
   <!-- пульт -->
@@ -165,7 +170,7 @@ a { color: var(--accent); }
       <div class="status-line" id="pushMsg"></div>
     </div>
 
-    <div class="card" style="margin-top:14px">
+    <div class="card" style="margin-top:14px" id="keysCard">
       <h2>Ключи</h2>
       <div class="keys" id="keyList"><div class="empty">Жду список от сигнализации…</div></div>
       <div class="row" style="margin-top:12px">
@@ -187,8 +192,27 @@ a { color: var(--accent); }
     </div>
 
     <div class="card" style="margin-top:14px">
-      <h2>Телефон</h2>
-      <div class="row">
+      <h2>Телефоны</h2>
+      <div class="keys" id="phoneList"><div class="empty">Появится вместе с состоянием</div></div>
+      <div class="status-line" id="phoneMsg" aria-live="polite"></div>
+      <div id="inviteBox" hidden>
+        <div class="row"><button id="inviteBtn" aria-expanded="false" aria-controls="inviteForm">Пригласить телефон</button></div>
+        <div class="form" id="inviteForm" hidden style="margin-top:12px">
+          <label class="field wide"><span>Чей телефон<small>так он будет называться в списке и в журнале</small></span>
+            <input type="text" id="invName" maxlength="24" placeholder="Например, Сергей" autocomplete="off"></label>
+          <label class="check"><input type="checkbox" id="invAdmin"> <span>Администратор: может менять ключи, телефоны и настройки</span></label>
+          <div class="row"><button id="invCreate">Создать приглашение</button></div>
+          <div id="invResult" hidden>
+            <p class="note">Отправьте эту ссылку только этому человеку. Она одноразовая и действует 10 минут. На iPhone сначала добавьте приложение на экран «Домой», откройте его и вставьте ссылку в поле привязки.</p>
+            <textarea id="invLink" readonly></textarea>
+            <div class="row" style="margin-top:10px">
+              <button id="invShare">Отправить…</button>
+              <button id="invCopy">Скопировать</button>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div class="row" style="margin-top:12px">
         <button id="unpairBtn">Отвязать этот телефон</button>
       </div>
     </div>
@@ -208,7 +232,13 @@ const REPLY_TIMEOUT_MS = 20000;
 const FRESH_S = 6 * 60;
 const TAGS = { rotating_light: '🚨', lock: '🔒', unlock: '🔓', warning: '⚠️', door: '🚪', key: '🔑', camera: '📷', white_check_mark: '✅' };
 
-let cfg = null, key = null;
+const LS_V2 = 'esp-alarma-v2';
+const JOIN_TIMEOUT_MS = 30000;
+
+// cfg: {events, cmd, state} + либо secret (старая привязка общим секретом),
+// либо dpk/slot/fp (свой ключ телефона: ключ платы, номер и отпечаток своего ключа)
+let cfg = null, key = null, phoneKey = null, devKey = null;
+let migrating = null, migrateTried = false, revoked = false;
 let state = null, stateTime = 0;          // время сервера ntfy, когда пришло последнее состояние (с)
 let pending = null, confirmUntil = 0;
 let ping = null;                          // {nonce, sent, timer} — ждём подтверждения связи
@@ -228,10 +258,68 @@ function parsePair(s) {
   const m = s.trim().match(/^esp-alarma:1:([\w-]+):([\w-]+):([\w-]+):(\S{16,})$/);
   return m && { events: m[1], cmd: m[2], state: m[3], secret: m[4] };
 }
+// ссылка-приглашение …#join=<base64url JSON {v,e,c,s,k,t,n}>
+function parseInvite(s) {
+  const m = s.trim().match(/(?:#|^)join=([\w-]+)/);
+  if (!m) return null;
+  try {
+    const j = JSON.parse(new TextDecoder().decode(fromB64url(m[1])));
+    return j.v === 2 && j.e && j.c && j.s && j.k && j.t ? j : null;
+  } catch { return null; }
+}
+
+/* ---------- ключ телефона: ECDSA P-256, закрытая часть не извлекается и хранится в IndexedDB ---------- */
+const ECDSA = { name: 'ECDSA', namedCurve: 'P-256' };
+const SIGN = { name: 'ECDSA', hash: 'SHA-256' };
+function idb(mode, fn) {
+  return new Promise((resolve, reject) => {
+    const rq = indexedDB.open('esp-alarma', 1);
+    rq.onupgradeneeded = () => rq.result.createObjectStore('kv');
+    rq.onerror = () => reject(rq.error);
+    rq.onsuccess = () => {
+      const tx = rq.result.transaction('kv', mode);
+      const r = fn(tx.objectStore('kv'));
+      tx.oncomplete = () => resolve(r?.result);
+      tx.onerror = () => reject(tx.error);
+    };
+  });
+}
+const idbGet = k => idb('readonly', st => st.get(k));
+const idbPut = (k, v) => idb('readwrite', st => st.put(v, k));
+const idbDel = k => idb('readwrite', st => st.delete(k));
+async function newPhoneKey() {
+  const kp = await crypto.subtle.generateKey(ECDSA, false, ['sign', 'verify']);
+  const pub = new Uint8Array(await crypto.subtle.exportKey('raw', kp.publicKey));
+  const fp = hex(await crypto.subtle.digest('SHA-256', pub)).slice(0, 8);
+  return { kp, pub, fp };
+}
+const importDevKey = k => crypto.subtle.importKey('raw', fromB64url(k), ECDSA, false, ['verify']);
+
+// подпись состояния: «JSON\nHMAC\nECDSA». Возвращает JSON-текст или null.
+async function verifyState(text, dk = devKey) {
+  const lines = text.split('\n');
+  if (lines.length < 2) return null;
+  if (dk) {
+    if (!lines[2]) return null;
+    try {
+      return await crypto.subtle.verify(SIGN, dk, fromB64url(lines[2].trim()), enc.encode(lines[0])) ? lines[0] : null;
+    } catch { return null; }
+  }
+  return key && await hmac(lines[0]) === lines[1].trim() ? lines[0] : null;
+}
+async function signCmd(text, kp = phoneKey) { return b64url(await crypto.subtle.sign(SIGN, kp.privateKey, enc.encode(text))); }
+
+const me = () => cfg?.slot != null && state?.ph ? state.ph.find(r => r[0] === cfg.slot && r[3] === cfg.fp) : null;
+const isAdmin = () => cfg?.secret ? true : !!me()?.[2];
 
 async function start(c) {
   cfg = c;
-  key = await crypto.subtle.importKey('raw', enc.encode(cfg.secret), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
+  if (cfg.secret) key = await crypto.subtle.importKey('raw', enc.encode(cfg.secret), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
+  else {
+    devKey = await importDevKey(cfg.dpk);
+    phoneKey = await idbGet('phone');
+    if (!phoneKey) { $('#pairMsg').textContent = 'Ключ этого телефона потерян (очищены данные браузера). Попросите новое приглашение.'; $('#pairMsg').className = 'status-line err'; lsSet(LS_V2, null); $('#setup').hidden = false; return; }
+  }
   $('#setup').hidden = true;
   $('#panel').hidden = false;
   connect();
@@ -282,15 +370,21 @@ async function sendPing() {
 
 /* ---------- состояние ---------- */
 async function onState(m) {
-  const text = m.message || '';
-  const i = text.lastIndexOf('\n');
-  if (i < 0) return;
-  const body = text.slice(0, i), sig = text.slice(i + 1).trim();
-  if (await hmac(body) !== sig) { console.warn('state: неверная подпись, игнорирую'); return; }
+  const body = await verifyState(m.message || '');
+  if (!body) { console.warn('state: неверная подпись, игнорирую'); return; }
   const s = JSON.parse(body);
   if (stateTime && m.time < stateTime) return;
   const changed = !state || state.st !== s.st;
   state = s; stateTime = m.time;
+  if (migrating && s.ack === migrating.nonce) await finishMigration(s);
+  else if (cfg.secret && s.ph && s.vapid && !migrateTried) startMigration();
+  revoked = !cfg.secret && !!s.ph && !me();
+  if (phonePending && s.ack === phonePending.nonce) {
+    clearTimeout(phonePending.timer);
+    const r = phonePending.check(s);
+    phoneMsg(r[0], r[1]);
+    phonePending = null;
+  }
   if (Date.now() / 1000 - m.time < FRESH_S) { lastReplyMs = Math.max(lastReplyMs, m.time * 1000); noReply = false; }
   if (ping && s.ack === ping.nonce) { clearTimeout(ping.timer); ping = null; lastReplyMs = Date.now(); noReply = false; }
   if (pending && (s.ack === pending.nonce || changed)) { setMsg(pending.done, 'ok'); clearTimeout(pending.timer); pending = null; }
@@ -310,6 +404,7 @@ async function onState(m) {
   }
   renderLog();
   renderKeys();
+  renderPhones();
   renderPush();
   render();
 }
@@ -343,11 +438,18 @@ function render() {
   if (timed && left > 0) parts.push(state.st === 'ALARM' ? `сирена ещё ${left} с` : `осталось ${left} с`);
   if (state.mem && state.st === 'DISARMED') parts.push('во время охраны была тревога');
   if (noReply) parts.push(`последние данные ${fmtAgo(age)} назад`);
-  $('#stSub').textContent = parts.join(' · ');
+  $('#stSub').textContent = revoked ? 'Этот телефон отключён от сигнализации. Попросите новое приглашение.' : parts.join(' · ');
+
+  const admin = isAdmin() && !revoked;
+  $('#settingsBtn').hidden = !admin;
+  if (!admin) $('#settings').hidden = true;
+  $('#keysCard').hidden = !admin;
+  $('#inviteBox').hidden = !admin;
+  $('#snapBtn').disabled = revoked;
 
   const armed = !['DISARMED', 'LEARN'].includes(state.st);
   const btn = $('#mainBtn');
-  btn.disabled = state.st === 'LEARN';
+  btn.disabled = state.st === 'LEARN' || revoked;
   btn.classList.toggle('disarm', armed);
   const confirming = now < confirmUntil;
   btn.classList.toggle('confirm', confirming);
@@ -410,9 +512,12 @@ function nonce() { const a = new Uint8Array(9); crypto.getRandomValues(a); retur
 
 // возвращает nonce отправленной команды или null
 async function send(c, data, quiet) {
+  if (revoked) { if (!quiet) setMsg('Этот телефон отключён от сигнализации.', 'err'); return null; }
   const t = Math.floor(Date.now() / 1000), n = nonce();
-  const h = await hmac(`${c}|${t}|${n}` + (data != null ? `|${data}` : ''));
-  const body = { c, t, n, h };
+  const text = `${c}|${t}|${n}` + (data != null ? `|${data}` : '');
+  const body = { c, t, n };
+  if (cfg.secret) body.h = await hmac(text);
+  else { body.p = cfg.slot; body.s = await signCmd(text); }
   if (data != null) body.d = data;
   try {
     const r = await fetch(`${NTFY}/${cfg.cmd}`, { method: 'POST', body: JSON.stringify(body) });
@@ -569,6 +674,175 @@ $('#clearKeysBtn').addEventListener('click', () => {
       : ['Ключи не стёрты: сигнализация не в режиме «снята».', 'err']);
 });
 
+/* ---------- телефоны ---------- */
+let phonePending = null, invite = null;
+function phoneMsg(text, kind) { const el = $('#phoneMsg'); el.textContent = text; el.className = 'status-line' + (kind ? ' ' + kind : ''); }
+
+async function phoneCommand(c, data, waiting, check) {
+  phoneMsg(waiting);
+  const n = await send(c, data, true);
+  if (!n) { phoneMsg('Команда не ушла: нет связи с ntfy.sh.', 'err'); return null; }
+  clearTimeout(phonePending?.timer);
+  phonePending = { nonce: n, check };
+  phonePending.timer = setTimeout(() => {
+    if (phonePending && phonePending.nonce === n) { phoneMsg('Сигнализация не ответила за 30 с.', 'err'); phonePending = null; }
+  }, JOIN_TIMEOUT_MS);
+  return n;
+}
+
+function renderPhones() {
+  const el = $('#phoneList');
+  if (!state) return;
+  el.innerHTML = '';
+  if (!state.ph) {
+    el.innerHTML = '<div class="empty">Обновите прошивку платы, чтобы подключать отдельные телефоны.</div>';
+    return;
+  }
+  const mine = me(), admin = isAdmin() && !revoked, now = Date.now();
+  if (cfg.secret) {
+    const row = document.createElement('div');
+    row.className = 'empty';
+    row.textContent = 'Этот телефон подключён общей строкой привязки и сейчас переходит на свой ключ…';
+    el.appendChild(row);
+  }
+  if (!state.ph.length && !cfg.secret) el.innerHTML = '<div class="empty">Телефонов нет</div>';
+  state.ph.forEach(([slot, name, adm]) => {
+    const row = document.createElement('div');
+    row.className = 'key';
+    row.innerHTML = '<div class="id"></div><button></button>';
+    const id = row.firstChild;
+    id.style.fontFamily = 'var(--f-ui)';
+    id.textContent = name;
+    const tag = (text, cls) => { const t = document.createElement('span'); t.className = 'tag' + (cls ? ' ' + cls : ''); t.textContent = text; id.appendChild(t); };
+    if (mine && mine[0] === slot) tag('этот телефон', 'me');
+    if (adm) tag('администратор');
+    const b = row.lastChild;
+    const self = mine && mine[0] === slot;
+    b.hidden = !admin || self;
+    const sure = keyConfirm.what === 'ph' + slot && now < keyConfirm.until;
+    b.textContent = sure ? 'Точно?' : 'Отключить';
+    b.classList.toggle('confirm', sure);
+    b.setAttribute('aria-label', `Отключить телефон «${name}»`);
+    b.addEventListener('click', () => {
+      if (!confirmed('ph' + slot)) { renderPhones(); setTimeout(renderPhones, 3100); return; }
+      phoneCommand('phone-del', String(slot), `Отключаю «${name}»…`,
+        s => (s.ph || []).some(r => r[0] === slot)
+          ? ['Не отключён: это последний телефон-администратор. Сначала пригласите другого администратора.', 'err']
+          : [`Телефон «${name}» отключён: команды с него больше не принимаются.`, 'ok']);
+    });
+    el.appendChild(row);
+  });
+}
+
+/* старая привязка (общий секрет) → свой ключ: телефон регистрирует свой открытый ключ и забывает секрет */
+async function startMigration() {
+  migrateTried = true;                          // один раз за запуск: не засыпать плату запросами
+  try {
+    const k = await newPhoneKey();
+    migrating = { ...k, nonce: null };
+    migrating.nonce = await send('phone-self', JSON.stringify({ pk: b64url(k.pub), name: 'Владелец' }), true);
+    if (!migrating.nonce) migrating = null;
+  } catch (e) { console.warn('переход на свой ключ не удался', e); migrating = null; }
+}
+async function finishMigration(s) {
+  const k = migrating;
+  migrating = null;
+  const row = (s.ph || []).find(r => r[3] === k.fp);
+  if (!row) return;
+  try { await idbPut('phone', k.kp); } catch (e) { console.warn('IndexedDB недоступна — остаюсь на общей строке', e); return; }
+  const c2 = { events: cfg.events, cmd: cfg.cmd, state: cfg.state, dpk: s.vapid, slot: row[0], fp: k.fp };
+  lsSet(LS_V2, JSON.stringify(c2));
+  lsSet(LS_KEY, null);                          // общий секрет больше не хранится на телефоне
+  cfg = c2; key = null; phoneKey = k.kp; devKey = await importDevKey(c2.dpk);
+  phoneMsg('Этот телефон перешёл на свой ключ. Теперь можно приглашать другие телефоны.', 'ok');
+  if (lsGet(LS_PUSH) === '1') resendPush();
+}
+async function resendPush() {                  // привязать push-подписку к своему телефону
+  try {
+    const sub = await (await navigator.serviceWorker.ready).pushManager.getSubscription();
+    if (sub) await send('push-sub', JSON.stringify({ e: sub.endpoint, k: b64url(sub.getKey('p256dh')), a: b64url(sub.getKey('auth')) }), true);
+  } catch (e) { console.warn(e); }
+}
+
+$('#inviteBtn').addEventListener('click', () => {
+  const f = $('#inviteForm'), open = f.hidden;
+  f.hidden = !open;
+  $('#inviteBtn').setAttribute('aria-expanded', String(open));
+  if (open) $('#invName').focus();
+});
+$('#invCreate').addEventListener('click', async () => {
+  const name = $('#invName').value.trim();
+  if (!name) { phoneMsg('Впишите, чей это телефон.', 'err'); $('#invName').focus(); return; }
+  const dpk = cfg.dpk || state?.vapid;
+  if (!dpk) { phoneMsg('Жду состояние от сигнализации…', 'err'); return; }
+  const token = crypto.getRandomValues(new Uint8Array(16));
+  const h = hex(await crypto.subtle.digest('SHA-256', token));
+  const a = $('#invAdmin').checked ? 1 : 0;
+  $('#invResult').hidden = true;
+  const link = location.origin + location.pathname + '#join=' +
+    b64url(enc.encode(JSON.stringify({ v: 2, e: cfg.events, c: cfg.cmd, s: cfg.state, k: dpk, t: b64url(token), n: name })));
+  invite = { link, name };
+  await phoneCommand('invite', JSON.stringify({ h, name, a }), 'Создаю приглашение…', () => {
+    $('#invLink').value = link;
+    $('#invResult').hidden = false;
+    return [`Приглашение для «${name}» готово. Ссылка действует 10 минут.`, 'ok'];
+  });
+});
+$('#invShare').addEventListener('click', async () => {
+  if (!invite) return;
+  const text = `Приглашение в приложение «Охрана мастерской» для «${invite.name}». Откройте ссылку в течение 10 минут:`;
+  if (navigator.share) { try { await navigator.share({ title: 'Охрана мастерской', text, url: invite.link }); return; } catch (e) { if (e.name === 'AbortError') return; } }
+  $('#invCopy').click();
+});
+$('#invCopy').addEventListener('click', async () => {
+  const ta = $('#invLink');
+  try { await navigator.clipboard.writeText(ta.value); phoneMsg('Ссылка скопирована.', 'ok'); }
+  catch { ta.select(); phoneMsg('Выделил ссылку: скопируйте её вручную.'); }
+});
+
+/* новый телефон по приглашению: создаёт свой ключ, подписывает им запрос и ждёт, что плата внесёт его в список */
+async function join(inv) {
+  const msg = (t, kind) => { $('#pairMsg').textContent = t; $('#pairMsg').className = 'status-line' + (kind ? ' ' + kind : ''); };
+  $('#pairBtn').disabled = true;
+  msg('Создаю ключ этого телефона и отправляю его сигнализации…');
+  try {
+    const dk = await importDevKey(inv.k);
+    const k = await newPhoneKey();
+    const t = Math.floor(Date.now() / 1000), n = nonce();
+    const d = JSON.stringify({ t: inv.t, pk: b64url(k.pub) });
+    const s = await signCmd(`join|${t}|${n}|${d}`, k.kp);
+    const result = await new Promise((resolve, reject) => {
+      const es = new EventSource(`${NTFY}/${inv.s}/sse`);
+      const timer = setTimeout(() => { es.close(); reject(new Error('timeout')); }, JOIN_TIMEOUT_MS);
+      es.onmessage = async e => {
+        try {
+          const m = JSON.parse(e.data);
+          const body = await verifyState(m.message || '', dk);
+          if (!body) return;
+          const st = JSON.parse(body);
+          if (st.ack !== n) return;
+          clearTimeout(timer); es.close();
+          resolve(st);
+        } catch (err) { console.warn(err); }
+      };
+      let sent = false;
+      es.onopen = () => !sent && (sent = true) && fetch(`${NTFY}/${inv.c}`, { method: 'POST', body: JSON.stringify({ c: 'join', t, n, s, d }) })
+        .catch(() => { clearTimeout(timer); es.close(); reject(new Error('net')); });
+    });
+    const row = (result.ph || []).find(r => r[3] === k.fp);
+    if (!row) { msg('Приглашение не подошло: оно уже использовано или прошло больше 10 минут. Попросите новое.', 'err'); return; }
+    await idbPut('phone', k.kp);
+    const c2 = { events: inv.e, cmd: inv.c, state: inv.s, dpk: inv.k, slot: row[0], fp: k.fp };
+    lsSet(LS_V2, JSON.stringify(c2));
+    history.replaceState(null, '', location.pathname);
+    msg('');
+    start(c2);
+  } catch (e) {
+    msg(e.message === 'timeout' ? 'Сигнализация не ответила за 30 с. Проверьте интернет и попробуйте ещё раз (если ссылка ещё действует).'
+      : e.message === 'net' ? 'Нет связи с ntfy.sh.' : 'Не получилось: ' + e.message, 'err');
+  } finally { $('#pairBtn').disabled = false; }
+}
+
 /* ---------- Web Push ---------- */
 function pushSupported() { return 'serviceWorker' in navigator && 'PushManager' in window && 'Notification' in window; }
 
@@ -626,16 +900,23 @@ $('#pushBtn').addEventListener('click', async () => {
   }
 });
 
-$('#unpairBtn').addEventListener('click', () => {
+$('#unpairBtn').addEventListener('click', async () => {
   if ($('#unpairBtn').dataset.sure !== '1') { $('#unpairBtn').dataset.sure = '1'; $('#unpairBtn').textContent = 'Точно отвязать? Нажмите ещё раз'; return; }
+  if (lsGet(LS_PUSH) === '1') {               // отписать push, чтобы плата не слала уведомления в пустоту
+    try { const sub = await (await navigator.serviceWorker.ready).pushManager.getSubscription(); if (sub) { await send('push-unsub', sub.endpoint, true); await sub.unsubscribe(); } } catch {}
+  }
   lsSet(LS_KEY, null);
+  lsSet(LS_V2, null);
   lsSet(LS_PUSH, null);
+  try { await idbDel('phone'); } catch {}
   location.reload();
 });
 $('#pairBtn').addEventListener('click', () => {
   const text = $('#pairText').value;
+  const inv = parseInvite(text);
+  if (inv) { join(inv); return; }
   const c = parsePair(text);
-  if (!c) { $('#pairMsg').textContent = 'Строка не похожа на строку привязки. Она начинается с esp-alarma:1: и выводится командой pair.'; $('#pairMsg').className = 'status-line err'; return; }
+  if (!c) { $('#pairMsg').textContent = 'Не похоже ни на ссылку-приглашение, ни на строку привязки esp-alarma:1:…'; $('#pairMsg').className = 'status-line err'; return; }
   lsSet(LS_KEY, text.trim());
   start(c);
 });
@@ -645,8 +926,18 @@ if (!window.crypto?.subtle) {
   document.querySelector('main').innerHTML = '<div class="card">Приложение должно открываться по https — иначе браузер не даёт проверить подписи.</div>';
   return;
 }
-const saved = parsePair(lsGet(LS_KEY) || '');
-if (saved) start(saved); else $('#setup').hidden = false;
+let saved = null;
+try { saved = JSON.parse(lsGet(LS_V2) || 'null'); } catch {}
+saved = saved || parsePair(lsGet(LS_KEY) || '');
+const inv = parseInvite(location.hash);
+if (inv && !saved) {
+  $('#setup').hidden = false;
+  $('#pairText').value = location.href;
+  $('#pairNote').textContent = `Приглашение для «${inv.n || 'нового телефона'}». Нажмите «Подключить этот телефон», пока ссылка действует (10 минут с момента создания).`;
+} else if (saved) {
+  if (inv) history.replaceState(null, '', location.pathname);
+  start(saved);
+} else $('#setup').hidden = false;
 })();
 </script>
 </body>
