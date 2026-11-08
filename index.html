@@ -98,6 +98,11 @@ button.big.confirm { outline: 3px solid var(--fg); outline-offset: 2px; }
 .key button { padding: 8px 12px; font-size: 13.5px; }
 .key button.confirm, #clearKeysBtn.confirm { color: var(--bad); border-color: var(--bad); }
 .key .tag.me { background: color-mix(in srgb, var(--ok) 16%, transparent); color: var(--ok); }
+.sub + .sub { border-top: 1px solid var(--line); margin-top: 18px; padding-top: 16px; }
+#settings .status-line { margin: 8px 2px 0; }
+#settings .status-line:empty { min-height: 0; margin: 0; }
+#settings .form .status-line:empty { display: none; }
+#delaysBlock[hidden] + .sub { border-top: 0; margin-top: 0; padding-top: 0; }
 .field.wide { grid-template-columns: minmax(0, 1fr); }
 .field.wide input { text-align: left; font: 15px/1.2 var(--f-ui); }
 .check { display: flex; gap: 10px; align-items: flex-start; font-size: 14px; }
@@ -145,8 +150,9 @@ a { color: var(--accent); }
     <div class="status-line" id="cmdMsg" aria-live="polite"></div>
 
     <section class="card" id="settings" hidden style="margin-bottom:14px">
-      <h2>Настройки сигнализации</h2>
-      <div class="form">
+      <div class="sub" id="delaysBlock">
+        <h2>Задержки и сирена</h2>
+        <div class="form">
         <label class="field"><span>Задержка на выход<small>после касания ключом или кнопки «Поставить», 5–300 с</small></span>
           <input type="number" id="cfgExit" min="5" max="300" step="1" inputmode="numeric"></label>
         <label class="field"><span>Задержка на вход<small>сколько есть на снятие после открытия двери, 5–120 с</small></span>
@@ -155,22 +161,21 @@ a { color: var(--accent); }
           <input type="number" id="cfgSiren" min="10" max="600" step="1" inputmode="numeric"></label>
         <div class="row">
           <button id="cfgSave">Сохранить</button>
-          <button id="cfgCancel">Закрыть</button>
         </div>
         <div class="status-line" id="cfgMsg" aria-live="polite"></div>
       </div>
-    </section>
+      </div>
 
-    <div class="card">
+      <div class="sub">
       <h2>Уведомления</h2>
       <p class="note" id="pushNote">Push-уведомления приходят на этот телефон, даже когда приложение закрыто.</p>
       <div class="row">
         <button id="pushBtn">Включить push-уведомления</button>
       </div>
       <div class="status-line" id="pushMsg"></div>
-    </div>
+      </div>
 
-    <div class="card" style="margin-top:14px" id="keysCard">
+      <div class="sub" id="keysCard">
       <h2>Ключи</h2>
       <div class="keys" id="keyList"><div class="empty">Жду список от сигнализации…</div></div>
       <div class="row" style="margin-top:12px">
@@ -178,20 +183,10 @@ a { color: var(--accent); }
         <button id="clearKeysBtn">Стереть все</button>
       </div>
       <div class="status-line" id="keyMsg" aria-live="polite"></div>
-      <p class="note" style="margin:0">«Записать ключи» включает запись: приложенный новый ключ добавляется, уже записанный удаляется. Запись выключается мастер-ключом или через 30 с после последнего касания. Если ключей нет, первый приложенный станет мастер-ключом. Менять ключи можно, только когда сигнализация снята.</p>
-    </div>
+      <p class="note" style="margin:10px 0 0">«Записать ключи» включает запись: приложенный новый ключ добавляется, уже записанный удаляется. Запись выключается мастер-ключом или через 30 с после последнего касания. Если ключей нет, первый приложенный станет мастер-ключом. Менять ключи можно, только когда сигнализация снята.</p>
+      </div>
 
-    <div class="card" style="margin-top:14px">
-      <h2>События</h2>
-      <div class="feed" id="feed"><div class="empty">Событий за последние 12 часов нет</div></div>
-    </div>
-
-    <div class="card" style="margin-top:14px">
-      <h2>Журнал сигнализации</h2>
-      <div class="log" id="log"><div class="empty">Появится вместе с состоянием</div></div>
-    </div>
-
-    <div class="card" style="margin-top:14px">
+      <div class="sub">
       <h2>Телефоны</h2>
       <div class="keys" id="phoneList"><div class="empty">Появится вместе с состоянием</div></div>
       <div class="status-line" id="phoneMsg" aria-live="polite"></div>
@@ -215,6 +210,22 @@ a { color: var(--accent); }
       <div class="row" style="margin-top:12px">
         <button id="unpairBtn">Отвязать этот телефон</button>
       </div>
+      </div>
+
+      <div class="row sub">
+        <button id="cfgCancel">Закрыть настройки</button>
+      </div>
+    </section>
+
+    <div class="card" style="margin-top:14px">
+      <h2>События</h2>
+      <div class="feed" id="feed"><div class="empty">Событий за последние 12 часов нет</div></div>
+      <div class="row" style="margin-top:10px"><button id="feedMore" hidden aria-controls="feed" aria-expanded="false"></button></div>
+    </div>
+
+    <div class="card" style="margin-top:14px">
+      <h2>Журнал сигнализации</h2>
+      <div class="log" id="log"><div class="empty">Появится вместе с состоянием</div></div>
     </div>
   </section>
 </main>
@@ -441,8 +452,7 @@ function render() {
   $('#stSub').textContent = revoked ? 'Этот телефон отключён от сигнализации. Попросите новое приглашение.' : parts.join(' · ');
 
   const admin = isAdmin() && !revoked;
-  $('#settingsBtn').hidden = !admin;
-  if (!admin) $('#settings').hidden = true;
+  $('#delaysBlock').hidden = !admin;
   $('#keysCard').hidden = !admin;
   $('#inviteBox').hidden = !admin;
   $('#snapBtn').disabled = revoked;
@@ -495,8 +505,22 @@ function addEvent(m, live) {
   const before = [...feed.children].find(c => Number(c.dataset.time) < m.time);
   feed.insertBefore(el, before || null);
   while (feed.children.length > 60) feed.lastChild.remove();
+  renderFeedLimit();
   if (live && (m.priority || 3) >= 4 && lsGet(LS_PUSH) !== '1') localNotify(m, icon);
 }
+
+// видно 10 последних событий, остальные — по кнопке
+const FEED_SHOWN = 10;
+let feedOpen = false;
+function renderFeedLimit() {
+  const items = [...$('#feed').querySelectorAll('.ev')];
+  items.forEach((el, i) => { el.hidden = !feedOpen && i >= FEED_SHOWN; });
+  const more = $('#feedMore'), extra = items.length - FEED_SHOWN;
+  more.hidden = extra <= 0;
+  more.textContent = feedOpen ? 'Свернуть' : `Показать ещё ${extra}`;
+  more.setAttribute('aria-expanded', String(feedOpen));
+}
+$('#feedMore').addEventListener('click', () => { feedOpen = !feedOpen; renderFeedLimit(); });
 
 async function localNotify(m, icon) {
   if (!('Notification' in window) || Notification.permission !== 'granted') return;

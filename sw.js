@@ -1,6 +1,6 @@
 // Кэш оболочки приложения, чтобы оно открывалось с главного экрана мгновенно.
 // Запросы к ntfy.sh не кэшируются: состояние и события всегда живые.
-const CACHE = 'esp-alarma-v5';
+const CACHE = 'esp-alarma-v6';
 const SHELL = ['./', 'index.html', 'manifest.webmanifest', 'icon-192.png', 'icon-512.png'];
 
 self.addEventListener('install', e => {
