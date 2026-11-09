@@ -159,6 +159,7 @@ a { color: var(--accent); }
           <input type="number" id="cfgEntry" min="5" max="120" step="1" inputmode="numeric"></label>
         <label class="field"><span>Сирена звучит не дольше<small>за одну тревогу, 10–600 с</small></span>
           <input type="number" id="cfgSiren" min="10" max="600" step="1" inputmode="numeric"></label>
+        <label class="check" id="cfgChimeRow"><input type="checkbox" id="cfgChime"> <span>Дверной звонок: пищалка «динь-динь», когда дверь открывают при снятой сигнализации</span></label>
         <div class="row">
           <button id="cfgSave">Сохранить</button>
         </div>
@@ -528,7 +529,8 @@ async function onState(m) {
   if (cfgPending && s.ack === cfgPending.nonce) {
     clearTimeout(cfgPending.timer);
     const want = cfgPending.want, got = s.cfg || {};
-    const ok = want.exit === got.exit && want.entry === got.entry && want.siren === got.siren;
+    const ok = want.exit === got.exit && want.entry === got.entry && want.siren === got.siren &&
+      (want.chime === undefined || want.chime === got.chime);
     cfgMsg(ok ? 'Сохранено на сигнализации.' : 'Сигнализация не приняла значения — проверьте пределы.', ok ? 'ok' : 'err');
     cfgPending = null;
     fillCfg();
@@ -722,6 +724,8 @@ function fillCfg() {
   $('#cfgExit').value = c.exit;
   $('#cfgEntry').value = c.entry;
   $('#cfgSiren').value = c.siren;
+  $('#cfgChimeRow').hidden = c.chime === undefined;      // старая прошивка без звонка
+  $('#cfgChime').checked = !!c.chime;
 }
 function toggleSettings(open) {
   $('#settings').hidden = !open;
@@ -735,6 +739,7 @@ $('#settingsBtn').addEventListener('click', () => toggleSettings($('#settings').
 $('#cfgCancel').addEventListener('click', () => toggleSettings(false));
 $('#cfgSave').addEventListener('click', async () => {
   const want = { exit: +$('#cfgExit').value, entry: +$('#cfgEntry').value, siren: +$('#cfgSiren').value };
+  if (state?.cfg?.chime !== undefined) want.chime = $('#cfgChime').checked;
   const bad = [[want.exit, 5, 300, 'выход'], [want.entry, 5, 120, 'вход'], [want.siren, 10, 600, 'сирена']]
     .find(([v, lo, hi]) => !Number.isInteger(v) || v < lo || v > hi);
   if (bad) { cfgMsg(`«${bad[3]}»: нужно целое число от ${bad[1]} до ${bad[2]}.`, 'err'); return; }
